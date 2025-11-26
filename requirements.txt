@@ -1,0 +1,4 @@
+streamlit
+streamlit-drawable-canvas-fix
+pandas
+pillow
