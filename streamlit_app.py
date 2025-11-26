@@ -143,5 +143,6 @@ if page == "Labeling":
 
             st.success("Label saved! Loading next image...")
             st.session_state.image_idx += 1
-            st.experimental_rerun()
+            st.rerun()
+
 
