@@ -68,27 +68,37 @@ if page == "Labeling":
     image_name = FAKE_IMAGES[st.session_state.image_idx]
     st.subheader(f"Current image: {image_name}")
 
-    # Create a simple blank image so we have something to draw on
+    # Create a simple background image
     width, height = 512, 512
-    img = Image.new("RGB", (width, height), (240, 240, 240))
+    img = Image.new("RGB", (width, height), (230, 230, 230))
     draw = ImageDraw.Draw(img)
-    # optional: draw a mock "clip" diagonal line in the center
-    draw.line((150, 150, 360, 360), fill=(0, 0, 0), width=3)
+    draw.line((150, 150, 360, 360), fill=(0, 0, 0), width=4)
 
-    st.write(f"Image size: {width} x {height}")
-    st.write("Draw ONE bounding box around the 'clip', then ONE line along its length (tip-to-tip).")
+    # Convert to numpy array (fix for canvas background on Streamlit Cloud)
+    import numpy as np
+    img_array = np.array(img)
+
+    st.write("Use the selector below to draw a bounding box and a line:")
+
+    tool = st.radio(
+        "Choose drawing tool:",
+        ["Rectangle (bbox)", "Line (axis)"],
+        horizontal=True
+    )
+
+    draw_mode = "rect" if tool.startswith("Rectangle") else "line"
 
     canvas_result = st_canvas(
         fill_color="rgba(0, 0, 0, 0)",
         stroke_width=3,
         stroke_color="#FF0000",
-        background_image=img,
+        background_image=img_array,     # <-- FIXED
         update_streamlit=True,
         height=height,
         width=width,
-        drawing_mode="transform",
+        drawing_mode=draw_mode,         # <-- FIXED
         key="canvas",
-        display_toolbar=True,
+        display_toolbar=True            # <-- should now appear
     )
 
     bbox_coords = None
@@ -97,38 +107,34 @@ if page == "Labeling":
     if canvas_result.json_data is not None:
         objects = canvas_result.json_data.get("objects", [])
         for obj in objects:
-            otype = obj.get("type", "")
-            if otype == "rect" and bbox_coords is None:
+            if obj["type"] == "rect" and bbox_coords is None:
                 left = obj["left"]
                 top = obj["top"]
                 w = obj["width"]
                 h = obj["height"]
                 bbox_coords = (left, top, left + w, top + h)
-            elif otype == "line" and axis_coords is None:
-                x1, y1, x2, y2 = obj["x1"], obj["y1"], obj["x2"], obj["y2"]
-                axis_coords = (x1, y1, x2, y2)
 
-    st.write("Parsed bounding box:", bbox_coords)
-    st.write("Parsed axis line:", axis_coords)
+            elif obj["type"] == "line" and axis_coords is None:
+                axis_coords = (obj["x1"], obj["y1"], obj["x2"], obj["y2"])
+
+    st.info(f"Parsed bbox: {bbox_coords}")
+    st.info(f"Parsed axis: {axis_coords}")
 
     if st.button("Submit label"):
         if bbox_coords is None or axis_coords is None:
-            st.error("Please draw ONE bounding box and ONE line before submitting.")
+            st.error("Please draw a rectangle AND a line before submitting.")
         else:
-            bbox_x1, bbox_y1, bbox_x2, bbox_y2 = bbox_coords
-            axis_x1, axis_y1, axis_x2, axis_y2 = axis_coords
-
             new_row = {
                 "image_name": image_name,
                 "annotator": annotator,
-                "bbox_x1": bbox_x1,
-                "bbox_y1": bbox_y1,
-                "bbox_x2": bbox_x2,
-                "bbox_y2": bbox_y2,
-                "axis_x1": axis_x1,
-                "axis_y1": axis_y1,
-                "axis_x2": axis_x2,
-                "axis_y2": axis_y2,
+                "bbox_x1": bbox_coords[0],
+                "bbox_y1": bbox_coords[1],
+                "bbox_x2": bbox_coords[2],
+                "bbox_y2": bbox_coords[3],
+                "axis_x1": axis_coords[0],
+                "axis_y1": axis_coords[1],
+                "axis_x2": axis_coords[2],
+                "axis_y2": axis_coords[3],
                 "created_at": datetime.utcnow().isoformat()
             }
 
@@ -137,6 +143,6 @@ if page == "Labeling":
                 ignore_index=True
             )
 
-            st.success("Label saved for this session. Moving to next fake image...")
+            st.success("Label saved! Loading next image...")
             st.session_state.image_idx += 1
             st.experimental_rerun()
