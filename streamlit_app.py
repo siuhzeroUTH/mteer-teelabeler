@@ -68,37 +68,35 @@ if page == "Labeling":
     image_name = FAKE_IMAGES[st.session_state.image_idx]
     st.subheader(f"Current image: {image_name}")
 
-    # Create a simple background image
+    # Create a simple background image (Pillow image)
     width, height = 512, 512
     img = Image.new("RGB", (width, height), (230, 230, 230))
     draw = ImageDraw.Draw(img)
+    # draw a mock "clip" diagonal
     draw.line((150, 150, 360, 360), fill=(0, 0, 0), width=4)
-
-    # Convert to numpy array (fix for canvas background on Streamlit Cloud)
-    import numpy as np
-    img_array = np.array(img)
 
     st.write("Use the selector below to draw a bounding box and a line:")
 
     tool = st.radio(
         "Choose drawing tool:",
         ["Rectangle (bbox)", "Line (axis)"],
-        horizontal=True
+        horizontal=True,
     )
-
     draw_mode = "rect" if tool.startswith("Rectangle") else "line"
 
+    # NOTE: background_image expects a PIL Image, NOT a numpy array
     canvas_result = st_canvas(
         fill_color="rgba(0, 0, 0, 0)",
         stroke_width=3,
         stroke_color="#FF0000",
-        background_image=img_array,     # <-- FIXED
+        background_color="#e6e6e6",  # fallback color
+        background_image=img,        # <-- pass PIL image directly
         update_streamlit=True,
         height=height,
         width=width,
-        drawing_mode=draw_mode,         # <-- FIXED
+        drawing_mode=draw_mode,
         key="canvas",
-        display_toolbar=True            # <-- should now appear
+        display_toolbar=True,
     )
 
     bbox_coords = None
@@ -135,14 +133,15 @@ if page == "Labeling":
                 "axis_y1": axis_coords[1],
                 "axis_x2": axis_coords[2],
                 "axis_y2": axis_coords[3],
-                "created_at": datetime.utcnow().isoformat()
+                "created_at": datetime.utcnow().isoformat(),
             }
 
             st.session_state.labels_df = pd.concat(
                 [st.session_state.labels_df, pd.DataFrame([new_row])],
-                ignore_index=True
+                ignore_index=True,
             )
 
             st.success("Label saved! Loading next image...")
             st.session_state.image_idx += 1
             st.experimental_rerun()
+
