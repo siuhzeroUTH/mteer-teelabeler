@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from io import BytesIO
-import json
 
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
@@ -21,8 +20,8 @@ LABELS_FILENAME    = st.secrets["drive"]["labels_filename"]
 
 @st.cache_resource
 def get_drive_service():
-    # st.secrets["service_account"] is already a dict-like object from TOML
-    info = dict(st.secrets["service_account"])
+    """Authenticate with Google Drive using service account from secrets."""
+    info = dict(st.secrets["service_account"])  # we stored fields as TOML, not JSON
     creds = service_account.Credentials.from_service_account_info(
         info,
         scopes=["https://www.googleapis.com/auth/drive"]
@@ -63,30 +62,37 @@ def move_file_to_labeled(service, file_id):
         fields="id, parents"
     ).execute()
 
-def get_or_create_labels_df(service):
-    """Load labels.csv from Drive meta folder, or create it if missing."""
+def get_labels_df(service):
+    """
+    Load labels.csv from Drive meta folder.
+    NOTE: we assume you manually created labels.csv in the meta folder.
+    We DO NOT create it from the service account to avoid quota issues.
+    """
     query = f"'{DRIVE_META_ID}' in parents and name = '{LABELS_FILENAME}' and trashed = false"
-    r = service.files().list(q=query, fields="files(id)").execute()
+    r = service.files().list(q=query, fields="files(id, name)").execute()
     files = r.get("files", [])
 
-    if files:
-        file_id = files[0]["id"]
-        req = service.files().get_media(fileId=file_id)
-        fh = BytesIO()
-        downloader = MediaIoBaseDownload(fh, req)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        fh.seek(0)
-        if fh.getbuffer().nbytes > 0:
-            df = pd.read_csv(fh)
-        else:
-            df = pd.DataFrame(columns=[
-                "image_name","drive_file_id","annotator",
-                "bbox_x1","bbox_y1","bbox_x2","bbox_y2",
-                "axis_x1","axis_y1","axis_x2","axis_y2",
-                "created_at"
-            ])
+    if not files:
+        st.error(
+            f"Could not find {LABELS_FILENAME} in the meta folder.\n\n"
+            f"Please create a file named '{LABELS_FILENAME}' in the meta folder "
+            f"with this header row:\n\n"
+            "image_name,drive_file_id,annotator,bbox_x1,bbox_y1,bbox_x2,bbox_y2,"
+            "axis_x1,axis_y1,axis_x2,axis_y2,created_at"
+        )
+        st.stop()
+
+    file_id = files[0]["id"]
+    req = service.files().get_media(fileId=file_id)
+    fh = BytesIO()
+    downloader = MediaIoBaseDownload(fh, req)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    fh.seek(0)
+
+    if fh.getbuffer().nbytes > 0:
+        df = pd.read_csv(fh)
     else:
         df = pd.DataFrame(columns=[
             "image_name","drive_file_id","annotator",
@@ -94,21 +100,6 @@ def get_or_create_labels_df(service):
             "axis_x1","axis_y1","axis_x2","axis_y2",
             "created_at"
         ])
-        fh = BytesIO()
-        df.to_csv(fh, index=False)
-        fh.seek(0)
-        meta = {
-            "name": LABELS_FILENAME,
-            "parents": [DRIVE_META_ID],
-            "mimeType": "text/csv"
-        }
-        body = MediaIoBaseUpload(fh, mimetype="text/csv")
-        file = service.files().create(
-            body=meta,
-            media_body=body,
-            fields="id"
-        ).execute()
-        file_id = file["id"]
 
     return file_id, df
 
@@ -129,7 +120,7 @@ st.set_page_config(page_title="TEE Clip Labeling", layout="wide")
 
 # Initialize Drive service and labels DataFrame
 service = get_drive_service()
-labels_file_id, labels_df = get_or_create_labels_df(service)
+labels_file_id, labels_df = get_labels_df(service)
 
 # Sidebar: annotator identity and page selection
 st.sidebar.title("Annotator")
@@ -189,7 +180,7 @@ if page == "Labeling":
     img = download_image_as_pil(service, file_id)
     width, height = img.size
 
-    # If image is huge, optionally downscale for display (coordinates will be in displayed space)
+    # Downscale very large images for display, but keep original coords by scaling back
     max_dim = 900
     scale = 1.0
     if max(width, height) > max_dim:
