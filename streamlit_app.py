@@ -16,7 +16,6 @@ import ssl
 
 # ----------------- CONFIG FROM ENV VARIABLES ----------------- #
 
-# These must be set in Render (or your local env)
 DRIVE_UNLABELED_ID = os.environ["DRIVE_UNLABELED_ID"]
 DRIVE_LABELED_ID   = os.environ["DRIVE_LABELED_ID"]
 DRIVE_META_ID      = os.environ["DRIVE_META_ID"]
@@ -48,8 +47,8 @@ def _drive_guard(fn, what: str):
         )
         st.stop()
 
-def list_unlabeled_images(service, page_size=1):
-    """Return a list of image files (id, name) in the unlabeled folder."""
+def list_unlabeled_images(service, page_size=1000):
+    """Return all image files (id, name) in the unlabeled folder."""
     def _call():
         query = (
             f"'{DRIVE_UNLABELED_ID}' in parents "
@@ -63,6 +62,19 @@ def list_unlabeled_images(service, page_size=1):
 
     r = _drive_guard(_call, "listing unlabeled images")
     return r.get("files", [])
+
+def get_next_unlabeled_image(service, labels_df):
+    """
+    Pick the first image in the unlabeled folder whose drive_file_id
+    is NOT already in labels_df (i.e., not already labeled).
+    """
+    files = list_unlabeled_images(service, page_size=1000)
+    labeled_ids = set(labels_df["drive_file_id"].astype(str)) if not labels_df.empty else set()
+
+    for f in files:
+        if f["id"] not in labeled_ids:
+            return f
+    return None  # nothing left to label
 
 def download_image_as_pil(service, file_id):
     """Download an image file from Drive and return as a PIL Image."""
@@ -81,22 +93,22 @@ def download_image_as_pil(service, file_id):
     return img
 
 def move_file_to_labeled(service, file_id):
-    """Move file from unlabeled folder to labeled folder in Drive."""
-    def _get_parents():
-        return service.files().get(fileId=file_id, fields="parents").execute()
-
-    file = _drive_guard(_get_parents, f"reading parents for {file_id}")
-    prev_parents = ",".join(file.get("parents", []))
-
-    def _update():
-        return service.files().update(
+    """
+    Try to move file from unlabeled folder to labeled folder in Drive.
+    If it fails, log a warning but DO NOT stop the app; the labeling
+    queue is driven by labels.csv, not by folder membership.
+    """
+    try:
+        file = service.files().get(fileId=file_id, fields="parents").execute()
+        prev_parents = ",".join(file.get("parents", []))
+        service.files().update(
             fileId=file_id,
             addParents=DRIVE_LABELED_ID,
             removeParents=prev_parents,
             fields="id, parents"
         ).execute()
-
-    _drive_guard(_update, f"moving {file_id} to labeled folder")
+    except Exception as e:
+        st.warning(f"Could not move file {file_id} to labeled folder: {e}")
 
 def get_labels_df(service):
     """
@@ -181,15 +193,21 @@ page = st.sidebar.radio("Page", ["Dashboard", "Labeling"])
 if page == "Dashboard":
     st.title("Labeling Dashboard")
 
-    unlabeled_files = list_unlabeled_images(service, page_size=1000)
-    total_unlabeled = len(unlabeled_files)
+    all_unlabeled_files = list_unlabeled_images(service, page_size=1000)
+    # Still in folder, whether labeled or not
+    total_in_folder = len(all_unlabeled_files)
+    # Truly unlabeled (not in labels.csv)
+    labeled_ids = set(labels_df["drive_file_id"].astype(str)) if not labels_df.empty else set()
+    total_unlabeled = sum(1 for f in all_unlabeled_files if f["id"] not in labeled_ids)
     total_labeled = len(labels_df)
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        st.metric("Unlabeled images", total_unlabeled)
+        st.metric("Images in unlabeled folder", total_in_folder)
     with c2:
-        st.metric("Labeled images", total_labeled)
+        st.metric("Unlabeled images (not in CSV)", total_unlabeled)
+    with c3:
+        st.metric("Labeled images (rows in CSV)", total_labeled)
 
     if total_labeled > 0:
         st.subheader("Labels per annotator")
@@ -209,12 +227,12 @@ if page == "Labeling":
         st.warning("Please enter your annotator ID in the sidebar.")
         st.stop()
 
-    unlabeled_files = list_unlabeled_images(service, page_size=1)
-    if not unlabeled_files:
-        st.success("No more unlabeled images in Drive folder.")
+    current_file = get_next_unlabeled_image(service, labels_df)
+
+    if current_file is None:
+        st.success("No more unlabeled images left to label in this folder.")
         st.stop()
 
-    current_file = unlabeled_files[0]
     file_id = current_file["id"]
     image_name = current_file["name"]
 
@@ -318,6 +336,8 @@ if page == "Labeling":
 
             labels_df = pd.concat([labels_df, pd.DataFrame([new_row])], ignore_index=True)
             save_labels_df(service, labels_file_id, labels_df)
+
+            # Try to move for organization, but do not rely on it for queue logic
             move_file_to_labeled(service, file_id)
 
             st.success("Label saved! Loading next image...")
