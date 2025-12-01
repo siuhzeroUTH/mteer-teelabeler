@@ -291,6 +291,14 @@ if page == "Labeling":
         width, height = new_width, new_height
 
     st.write(f"Displayed image size: {width} x {height}")
+    # Important: give each canvas its own copy of the image.
+    img_clip        = img.copy()
+    img_left_clip   = img.copy()
+    img_right_clip  = img.copy()
+    img_ant         = img.copy()
+    img_post        = img.copy()
+    img_left_stem   = img.copy()
+    img_right_stem  = img.copy()
 
     # ----------------- CLIP BBOX + AXIS (single canvas with radio) ----------------- #
     st.markdown("### Step 1: Clip bounding box and axis")
@@ -307,7 +315,7 @@ if page == "Labeling":
         stroke_width=3,
         stroke_color="#FF0000",
         background_color="#000000",
-        background_image=img,
+        background_image=img_clip,
         update_streamlit=True,
         height=height,
         width=width,
@@ -341,7 +349,7 @@ if page == "Labeling":
         stroke_width=2,
         stroke_color="#00FFFF",  # cyan
         background_color="#000000",
-        background_image=img,
+        background_image=img_left_clip,
         update_streamlit=True,
         height=height,
         width=width,
@@ -356,7 +364,7 @@ if page == "Labeling":
         stroke_width=2,
         stroke_color="#FFA500",  # orange
         background_color="#000000",
-        background_image=img,
+        background_image=img_right_clip,
         update_streamlit=True,
         height=height,
         width=width,
@@ -373,7 +381,7 @@ if page == "Labeling":
         stroke_width=2,
         stroke_color="#FFFF00",  # yellow
         background_color="#000000",
-        background_image=img,
+        background_image=img_ant,
         update_streamlit=True,
         height=height,
         width=width,
@@ -388,7 +396,7 @@ if page == "Labeling":
         stroke_width=2,
         stroke_color="#0000FF",  # blue
         background_color="#000000",
-        background_image=img,
+        background_image=img_post,
         update_streamlit=True,
         height=height,
         width=width,
@@ -405,7 +413,7 @@ if page == "Labeling":
         stroke_width=2,
         stroke_color="#FF00FF",  # magenta
         background_color="#000000",
-        background_image=img,
+        background_image=img_left_stem,
         update_streamlit=True,
         height=height,
         width=width,
@@ -420,7 +428,7 @@ if page == "Labeling":
         stroke_width=2,
         stroke_color="#00FF00",  # green
         background_color="#000000",
-        background_image=img,
+        background_image=img_right_stem,
         update_streamlit=True,
         height=height,
         width=width,
