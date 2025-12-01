@@ -10,6 +10,7 @@ from streamlit_drawable_canvas import st_canvas
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+st.write("Loaded folders:", st.secrets["drive"])
 
 # ----------------- CONFIG & GOOGLE DRIVE HELPERS ----------------- #
 
