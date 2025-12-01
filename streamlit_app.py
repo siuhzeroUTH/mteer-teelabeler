@@ -9,9 +9,8 @@ from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
 from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
-from googleapiclient.errors import HttpError
+from google.auth.transport.requests import AuthorizedSession
+import requests
 import ssl
 
 # ----------------- CONFIG FROM ENV VARIABLES ----------------- #
@@ -23,22 +22,25 @@ LABELS_FILENAME    = os.environ.get("LABELS_FILENAME", "labels.csv")
 
 SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 
+DRIVE_BASE = "https://www.googleapis.com/drive/v3"
+DRIVE_UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3"
+
+# ----------------- AUTH & LOW-LEVEL DRIVE HELPERS ----------------- #
+
 @st.cache_resource
-def get_drive_service():
-    """Authenticate with Google Drive using service account JSON from env."""
+def get_drive_session():
+    """Return an AuthorizedSession that can talk to Google Drive."""
     info = json.loads(SERVICE_ACCOUNT_JSON)
     creds = service_account.Credentials.from_service_account_info(
         info,
         scopes=["https://www.googleapis.com/auth/drive"]
     )
-    service = build("drive", "v3", credentials=creds)
-    return service
+    return AuthorizedSession(creds)
 
 def _drive_guard(fn, what: str):
-    """Run a Drive API call and show a friendly error if it fails."""
     try:
         return fn()
-    except (HttpError, ssl.SSLError) as e:
+    except (requests.RequestException, ssl.SSLError) as e:
         st.error(
             f"Error talking to Google Drive while **{what}**.\n\n"
             "This is a network/SSL issue between the host and Google. "
@@ -47,81 +49,115 @@ def _drive_guard(fn, what: str):
         )
         st.stop()
 
-def list_unlabeled_images(service, page_size=1000):
-    """Return all image files (id, name) in the unlabeled folder."""
+def drive_list_files(session, q, fields="files(id,name)", page_size=1000):
     def _call():
-        query = (
-            f"'{DRIVE_UNLABELED_ID}' in parents "
-            f"and mimeType contains 'image/' and trashed = false"
+        params = {
+            "q": q,
+            "fields": fields,
+            "pageSize": page_size,
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        r = session.get(f"{DRIVE_BASE}/files", params=params)
+        r.raise_for_status()
+        return r.json()
+    return _drive_guard(_call, "listing files")
+
+def drive_get_media(session, file_id):
+    def _call():
+        r = session.get(
+            f"{DRIVE_BASE}/files/{file_id}",
+            params={"alt": "media"},
+            stream=True,
         )
-        return service.files().list(
-            q=query,
-            pageSize=page_size,
-            fields="files(id, name)"
-        ).execute()
+        r.raise_for_status()
+        return BytesIO(r.content)
+    return _drive_guard(_call, f"downloading file {file_id}")
 
-    r = _drive_guard(_call, "listing unlabeled images")
-    return r.get("files", [])
+def drive_get_metadata(session, file_id, fields="id,parents"):
+    def _call():
+        r = session.get(
+            f"{DRIVE_BASE}/files/{file_id}",
+            params={"fields": fields},
+        )
+        r.raise_for_status()
+        return r.json()
+    return _drive_guard(_call, f"getting metadata for {file_id}")
 
-def get_next_unlabeled_image(service, labels_df):
+def drive_update_media(session, file_id, data_bytes, mime_type="text/csv"):
+    def _call():
+        headers = {"Content-Type": mime_type}
+        r = session.patch(
+            f"{DRIVE_UPLOAD_BASE}/files/{file_id}",
+            params={"uploadType": "media"},
+            data=data_bytes,
+            headers=headers,
+        )
+        r.raise_for_status()
+        return r.json()
+    return _drive_guard(_call, f"updating file {file_id}")
+
+def drive_update_parents(session, file_id, add_parents, remove_parents):
+    def _call():
+        params = {
+            "addParents": add_parents,
+            "removeParents": remove_parents,
+            "fields": "id,parents",
+        }
+        r = session.patch(f"{DRIVE_BASE}/files/{file_id}", params=params)
+        r.raise_for_status()
+        return r.json()
+    return _drive_guard(_call, f"updating parents for {file_id}")
+
+# ----------------- HIGH-LEVEL DRIVE OPERATIONS ----------------- #
+
+def list_unlabeled_images(session):
+    """Return all image files (id, name) in the unlabeled folder."""
+    q = (
+        f"'{DRIVE_UNLABELED_ID}' in parents "
+        f"and mimeType contains 'image/' and trashed = false"
+    )
+    resp = drive_list_files(session, q, fields="files(id,name)", page_size=1000)
+    return resp.get("files", [])
+
+def get_next_unlabeled_image(session, labels_df):
     """
     Pick the first image in the unlabeled folder whose drive_file_id
     is NOT already in labels_df (i.e., not already labeled).
     """
-    files = list_unlabeled_images(service, page_size=1000)
+    files = list_unlabeled_images(session)
     labeled_ids = set(labels_df["drive_file_id"].astype(str)) if not labels_df.empty else set()
-
     for f in files:
         if f["id"] not in labeled_ids:
             return f
-    return None  # nothing left to label
+    return None
 
-def download_image_as_pil(service, file_id):
-    """Download an image file from Drive and return as a PIL Image."""
-    def _call():
-        request = service.files().get_media(fileId=file_id)
-        fh = BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        fh.seek(0)
-        return fh
-
-    fh = _drive_guard(_call, f"downloading image file {file_id}")
+def download_image_as_pil(session, file_id):
+    fh = drive_get_media(session, file_id)
     img = Image.open(fh).convert("RGB")
     return img
 
-def move_file_to_labeled(service, file_id):
+def move_file_to_labeled(session, file_id):
     """
     Try to move file from unlabeled folder to labeled folder in Drive.
     If it fails, log a warning but DO NOT stop the app; the labeling
     queue is driven by labels.csv, not by folder membership.
     """
     try:
-        file = service.files().get(fileId=file_id, fields="parents").execute()
-        prev_parents = ",".join(file.get("parents", []))
-        service.files().update(
-            fileId=file_id,
-            addParents=DRIVE_LABELED_ID,
-            removeParents=prev_parents,
-            fields="id, parents"
-        ).execute()
+        meta = drive_get_metadata(session, file_id, fields="id,parents")
+        prev_parents = ",".join(meta.get("parents", []))
+        drive_update_parents(session, file_id, add_parents=DRIVE_LABELED_ID, remove_parents=prev_parents)
     except Exception as e:
         st.warning(f"Could not move file {file_id} to labeled folder: {e}")
 
-def get_labels_df(service):
+def get_labels_df(session):
     """
     Load labels.csv from Drive meta folder.
     We assume you manually created labels.csv in the meta folder.
     """
-    def _list():
-        query = f"'{DRIVE_META_ID}' in parents and trashed = false"
-        return service.files().list(q=query, fields="files(id, name)").execute()
-
-    r = _drive_guard(_list, "listing files in meta folder")
-    files = r.get("files", [])
-
+    q = f"'{DRIVE_META_ID}' in parents and trashed = false"
+    resp = drive_list_files(session, q, fields="files(id,name)")
+    files = resp.get("files", [])
     labels_files = [f for f in files if f["name"] == LABELS_FILENAME]
 
     if not labels_files:
@@ -135,18 +171,7 @@ def get_labels_df(service):
         st.stop()
 
     file_id = labels_files[0]["id"]
-
-    def _get_media():
-        req = service.files().get_media(fileId=file_id)
-        fh = BytesIO()
-        downloader = MediaIoBaseDownload(fh, req)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        fh.seek(0)
-        return fh
-
-    fh = _drive_guard(_get_media, f"downloading {LABELS_FILENAME}")
+    fh = drive_get_media(session, file_id)
 
     if fh.getbuffer().nbytes > 0:
         df = pd.read_csv(fh)
@@ -160,26 +185,16 @@ def get_labels_df(service):
 
     return file_id, df
 
-def save_labels_df(service, file_id, df):
-    """Overwrite labels.csv in Drive with the updated DataFrame."""
-    def _update():
-        fh = BytesIO()
-        df.to_csv(fh, index=False)
-        fh.seek(0)
-        body = MediaIoBaseUpload(fh, mimetype="text/csv")
-        return service.files().update(
-            fileId=file_id,
-            media_body=body
-        ).execute()
-
-    _drive_guard(_update, f"updating {LABELS_FILENAME}")
+def save_labels_df(session, file_id, df):
+    data = df.to_csv(index=False).encode("utf-8")
+    drive_update_media(session, file_id, data, mime_type="text/csv")
 
 # ----------------- STREAMLIT APP LAYOUT ----------------- #
 
 st.set_page_config(page_title="TEE Clip Labeling", layout="wide")
 
-service = get_drive_service()
-labels_file_id, labels_df = get_labels_df(service)
+session = get_drive_session()
+labels_file_id, labels_df = get_labels_df(session)
 
 st.sidebar.title("Annotator")
 annotator = st.sidebar.text_input("Enter your ID/name", value="", max_chars=50)
@@ -193,11 +208,9 @@ page = st.sidebar.radio("Page", ["Dashboard", "Labeling"])
 if page == "Dashboard":
     st.title("Labeling Dashboard")
 
-    all_unlabeled_files = list_unlabeled_images(service, page_size=1000)
-    # Still in folder, whether labeled or not
-    total_in_folder = len(all_unlabeled_files)
-    # Truly unlabeled (not in labels.csv)
+    all_unlabeled_files = list_unlabeled_images(session)
     labeled_ids = set(labels_df["drive_file_id"].astype(str)) if not labels_df.empty else set()
+    total_in_folder = len(all_unlabeled_files)
     total_unlabeled = sum(1 for f in all_unlabeled_files if f["id"] not in labeled_ids)
     total_labeled = len(labels_df)
 
@@ -227,7 +240,7 @@ if page == "Labeling":
         st.warning("Please enter your annotator ID in the sidebar.")
         st.stop()
 
-    current_file = get_next_unlabeled_image(service, labels_df)
+    current_file = get_next_unlabeled_image(session, labels_df)
 
     if current_file is None:
         st.success("No more unlabeled images left to label in this folder.")
@@ -239,7 +252,7 @@ if page == "Labeling":
     st.subheader(f"Current image: {image_name}")
     st.write("DEBUG – current Drive file:", current_file)
 
-    img = download_image_as_pil(service, file_id)
+    img = download_image_as_pil(session, file_id)
     width, height = img.size
 
     # Show raw image
@@ -335,10 +348,8 @@ if page == "Labeling":
             }
 
             labels_df = pd.concat([labels_df, pd.DataFrame([new_row])], ignore_index=True)
-            save_labels_df(service, labels_file_id, labels_df)
-
-            # Try to move for organization, but do not rely on it for queue logic
-            move_file_to_labeled(service, file_id)
+            save_labels_df(session, labels_file_id, labels_df)
+            move_file_to_labeled(session, file_id)
 
             st.success("Label saved! Loading next image...")
             st.rerun()
