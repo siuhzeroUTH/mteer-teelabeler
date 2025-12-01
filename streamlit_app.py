@@ -1,21 +1,137 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from PIL import Image, ImageDraw
+from io import BytesIO
+import json
+
+from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
-st.set_page_config(page_title="TEE Clip Labeling (Cloud Prototype)", layout="wide")
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-# ---- Fake in-memory "unlabeled images" list for now ----
-# Later we'll replace this with Google Drive.
-FAKE_IMAGES = ["fake_case001_bicomm_frame0001.png",
-               "fake_case001_bicomm_frame0002.png"]
+# ----------------- CONFIG & GOOGLE DRIVE HELPERS ----------------- #
 
-# Session state index to walk through fake images
-if "image_idx" not in st.session_state:
-    st.session_state.image_idx = 0
+# Folder IDs and labels filename from Streamlit secrets
+DRIVE_UNLABELED_ID = st.secrets["drive"]["unlabeled_folder_id"]
+DRIVE_LABELED_ID   = st.secrets["drive"]["labeled_folder_id"]
+DRIVE_META_ID      = st.secrets["drive"]["meta_folder_id"]
+LABELS_FILENAME    = st.secrets["drive"]["labels_filename"]
 
-# Sidebar: annotator ID
+@st.cache_resource
+def get_drive_service():
+    """Authenticate with Google Drive using service account from secrets."""
+    info = json.loads(st.secrets["service_account_json"])
+    creds = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    service = build("drive", "v3", credentials=creds)
+    return service
+
+def list_unlabeled_images(service, page_size=1):
+    """Return a list of image files (id, name) in the unlabeled folder."""
+    query = f"'{DRIVE_UNLABELED_ID}' in parents and mimeType contains 'image/' and trashed = false"
+    r = service.files().list(
+        q=query,
+        pageSize=page_size,
+        fields="files(id, name)"
+    ).execute()
+    return r.get("files", [])
+
+def download_image_as_pil(service, file_id):
+    """Download an image file from Drive and return as a PIL Image."""
+    request = service.files().get_media(fileId=file_id)
+    fh = BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    fh.seek(0)
+    img = Image.open(fh).convert("RGB")
+    return img
+
+def move_file_to_labeled(service, file_id):
+    """Move file from unlabeled folder to labeled folder in Drive."""
+    file = service.files().get(fileId=file_id, fields="parents").execute()
+    prev_parents = ",".join(file.get("parents", []))
+    service.files().update(
+        fileId=file_id,
+        addParents=DRIVE_LABELED_ID,
+        removeParents=prev_parents,
+        fields="id, parents"
+    ).execute()
+
+def get_or_create_labels_df(service):
+    """Load labels.csv from Drive meta folder, or create it if missing."""
+    query = f"'{DRIVE_META_ID}' in parents and name = '{LABELS_FILENAME}' and trashed = false"
+    r = service.files().list(q=query, fields="files(id)").execute()
+    files = r.get("files", [])
+
+    if files:
+        file_id = files[0]["id"]
+        req = service.files().get_media(fileId=file_id)
+        fh = BytesIO()
+        downloader = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        fh.seek(0)
+        if fh.getbuffer().nbytes > 0:
+            df = pd.read_csv(fh)
+        else:
+            df = pd.DataFrame(columns=[
+                "image_name","drive_file_id","annotator",
+                "bbox_x1","bbox_y1","bbox_x2","bbox_y2",
+                "axis_x1","axis_y1","axis_x2","axis_y2",
+                "created_at"
+            ])
+    else:
+        df = pd.DataFrame(columns=[
+            "image_name","drive_file_id","annotator",
+            "bbox_x1","bbox_y1","bbox_x2","bbox_y2",
+            "axis_x1","axis_y1","axis_x2","axis_y2",
+            "created_at"
+        ])
+        fh = BytesIO()
+        df.to_csv(fh, index=False)
+        fh.seek(0)
+        meta = {
+            "name": LABELS_FILENAME,
+            "parents": [DRIVE_META_ID],
+            "mimeType": "text/csv"
+        }
+        body = MediaIoBaseUpload(fh, mimetype="text/csv")
+        file = service.files().create(
+            body=meta,
+            media_body=body,
+            fields="id"
+        ).execute()
+        file_id = file["id"]
+
+    return file_id, df
+
+def save_labels_df(service, file_id, df):
+    """Overwrite labels.csv in Drive with the updated DataFrame."""
+    fh = BytesIO()
+    df.to_csv(fh, index=False)
+    fh.seek(0)
+    body = MediaIoBaseUpload(fh, mimetype="text/csv")
+    service.files().update(
+        fileId=file_id,
+        media_body=body
+    ).execute()
+
+# ----------------- STREAMLIT APP LAYOUT ----------------- #
+
+st.set_page_config(page_title="TEE Clip Labeling", layout="wide")
+
+# Initialize Drive service and labels DataFrame
+service = get_drive_service()
+labels_file_id, labels_df = get_or_create_labels_df(service)
+
+# Sidebar: annotator identity and page selection
 st.sidebar.title("Annotator")
 annotator = st.sidebar.text_input("Enter your ID/name", value="", max_chars=50)
 if not annotator:
@@ -23,26 +139,21 @@ if not annotator:
 
 page = st.sidebar.radio("Page", ["Dashboard", "Labeling"])
 
-# In-memory labels table (per session only, for now)
-if "labels_df" not in st.session_state:
-    st.session_state.labels_df = pd.DataFrame(columns=[
-        "image_name", "annotator",
-        "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
-        "axis_x1", "axis_y1", "axis_x2", "axis_y2",
-        "created_at"
-    ])
+# ----------------- DASHBOARD PAGE ----------------- #
 
-labels_df = st.session_state.labels_df
-
-# -------- DASHBOARD --------
 if page == "Dashboard":
-    st.title("Labeling Dashboard (Cloud Prototype)")
+    st.title("Labeling Dashboard")
 
-    total_unlabeled = max(0, len(FAKE_IMAGES) - st.session_state.image_idx)
+    # Count unlabeled images in Drive
+    unlabeled_files = list_unlabeled_images(service, page_size=1000)
+    total_unlabeled = len(unlabeled_files)
     total_labeled = len(labels_df)
 
-    st.metric("Unlabeled images (this session)", total_unlabeled)
-    st.metric("Labeled images (this session)", total_labeled)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("Unlabeled images", total_unlabeled)
+    with c2:
+        st.metric("Labeled images", total_labeled)
 
     if total_labeled > 0:
         st.subheader("Labels per annotator")
@@ -51,31 +162,49 @@ if page == "Dashboard":
         st.table(annot_counts)
 
         st.subheader("Recent labels")
-        st.dataframe(labels_df.sort_values("created_at", ascending=False).head(10))
+        st.dataframe(labels_df.sort_values("created_at", ascending=False).head(20))
 
-# -------- LABELING --------
+# ----------------- LABELING PAGE ----------------- #
+
 if page == "Labeling":
-    st.title("TEE Clip Labeling (Cloud Prototype)")
+    st.title("TEE Clip Labeling")
 
     if not annotator:
         st.warning("Please enter your annotator ID in the sidebar.")
         st.stop()
 
-    if st.session_state.image_idx >= len(FAKE_IMAGES):
-        st.success("No more unlabeled images in this demo.")
+    # Get next unlabeled image from Drive
+    unlabeled_files = list_unlabeled_images(service, page_size=1)
+    if not unlabeled_files:
+        st.success("No more unlabeled images in Drive folder.")
         st.stop()
 
-    image_name = FAKE_IMAGES[st.session_state.image_idx]
+    current_file = unlabeled_files[0]
+    file_id = current_file["id"]
+    image_name = current_file["name"]
+
     st.subheader(f"Current image: {image_name}")
 
-    # Create a simple background image (Pillow image)
-    width, height = 512, 512
-    img = Image.new("RGB", (width, height), (230, 230, 230))
-    draw = ImageDraw.Draw(img)
-    # draw a mock "clip" diagonal
-    draw.line((150, 150, 360, 360), fill=(0, 0, 0), width=4)
+    # Download and show image
+    img = download_image_as_pil(service, file_id)
+    width, height = img.size
 
-    st.write("Use the selector below to draw a bounding box and a line:")
+    # If image is huge, optionally downscale for display (coordinates will be in displayed space)
+    max_dim = 900
+    scale = 1.0
+    if max(width, height) > max_dim:
+        scale = max_dim / max(width, height)
+        new_width = int(width * scale)
+        new_height = int(height * scale)
+        img = img.resize((new_width, new_height))
+        width, height = new_width, new_height
+
+    st.write(f"Displayed image size: {width} x {height}")
+    st.write(
+        "1) Choose **Rectangle (bbox)** to draw a box around the clip.\n"
+        "2) Choose **Line (axis)** to draw a line along the clip's length.\n"
+        "Please draw exactly ONE rectangle and ONE line."
+    )
 
     tool = st.radio(
         "Choose drawing tool:",
@@ -84,13 +213,12 @@ if page == "Labeling":
     )
     draw_mode = "rect" if tool.startswith("Rectangle") else "line"
 
-    # NOTE: background_image expects a PIL Image, NOT a numpy array
     canvas_result = st_canvas(
         fill_color="rgba(0, 0, 0, 0)",
         stroke_width=3,
         stroke_color="#FF0000",
-        background_color="#e6e6e6",  # fallback color
-        background_image=img,        # <-- pass PIL image directly
+        background_color="#e6e6e6",
+        background_image=img,
         update_streamlit=True,
         height=height,
         width=width,
@@ -122,27 +250,40 @@ if page == "Labeling":
         if bbox_coords is None or axis_coords is None:
             st.error("Please draw a rectangle AND a line before submitting.")
         else:
+            # Save coordinates in original image space (undo scaling if we resized)
+            if scale != 1.0:
+                inv = 1.0 / scale
+                bbox_x1 = bbox_coords[0] * inv
+                bbox_y1 = bbox_coords[1] * inv
+                bbox_x2 = bbox_coords[2] * inv
+                bbox_y2 = bbox_coords[3] * inv
+                axis_x1 = axis_coords[0] * inv
+                axis_y1 = axis_coords[1] * inv
+                axis_x2 = axis_coords[2] * inv
+                axis_y2 = axis_coords[3] * inv
+            else:
+                bbox_x1, bbox_y1, bbox_x2, bbox_y2 = bbox_coords
+                axis_x1, axis_y1, axis_x2, axis_y2 = axis_coords
+
             new_row = {
                 "image_name": image_name,
+                "drive_file_id": file_id,
                 "annotator": annotator,
-                "bbox_x1": bbox_coords[0],
-                "bbox_y1": bbox_coords[1],
-                "bbox_x2": bbox_coords[2],
-                "bbox_y2": bbox_coords[3],
-                "axis_x1": axis_coords[0],
-                "axis_y1": axis_coords[1],
-                "axis_x2": axis_coords[2],
-                "axis_y2": axis_coords[3],
-                "created_at": datetime.utcnow().isoformat(),
+                "bbox_x1": bbox_x1,
+                "bbox_y1": bbox_y1,
+                "bbox_x2": bbox_x2,
+                "bbox_y2": bbox_y2,
+                "axis_x1": axis_x1,
+                "axis_y1": axis_y1,
+                "axis_x2": axis_x2,
+                "axis_y2": axis_y2,
+                "created_at": datetime.utcnow().isoformat()
             }
 
-            st.session_state.labels_df = pd.concat(
-                [st.session_state.labels_df, pd.DataFrame([new_row])],
-                ignore_index=True,
-            )
+            labels_df = pd.concat([labels_df, pd.DataFrame([new_row])], ignore_index=True)
+            save_labels_df(service, labels_file_id, labels_df)
+
+            move_file_to_labeled(service, file_id)
 
             st.success("Label saved! Loading next image...")
-            st.session_state.image_idx += 1
             st.rerun()
-
-
