@@ -310,7 +310,7 @@ if page == "Labeling":
                 "axis_y2": axis_y2,
                 "created_at": datetime.utcnow().isoformat()
             }
-
+ 
             labels_df = pd.concat([labels_df, pd.DataFrame([new_row])], ignore_index=True)
             save_labels_df(service, labels_file_id, labels_df)
             move_file_to_labeled(service, file_id)
