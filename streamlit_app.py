@@ -179,6 +179,8 @@ if page == "Labeling":
     # Download and show image
     img = download_image_as_pil(service, file_id)
     width, height = img.size
+    # DEBUG: show the raw image loaded from Drive
+    st.image(img, caption="Raw image from Drive", use_column_width=False)
 
     # Downscale very large images for display, but keep original coords by scaling back
     max_dim = 900
