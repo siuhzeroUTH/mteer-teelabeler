@@ -1,8 +1,10 @@
-import streamlit as st
-import pandas as pd
+import os
+import json
 from datetime import datetime
 from io import BytesIO
 
+import streamlit as st
+import pandas as pd
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
@@ -12,17 +14,20 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from googleapiclient.errors import HttpError
 import ssl
 
-# ----------------- CONFIG & GOOGLE DRIVE HELPERS ----------------- #
+# ----------------- CONFIG FROM ENV VARIABLES ----------------- #
 
-DRIVE_UNLABELED_ID = st.secrets["drive"]["unlabeled_folder_id"]
-DRIVE_LABELED_ID   = st.secrets["drive"]["labeled_folder_id"]
-DRIVE_META_ID      = st.secrets["drive"]["meta_folder_id"]
-LABELS_FILENAME    = st.secrets["drive"]["labels_filename"]
+# These must be set in Render (or your local env)
+DRIVE_UNLABELED_ID = os.environ["DRIVE_UNLABELED_ID"]
+DRIVE_LABELED_ID   = os.environ["DRIVE_LABELED_ID"]
+DRIVE_META_ID      = os.environ["DRIVE_META_ID"]
+LABELS_FILENAME    = os.environ.get("LABELS_FILENAME", "labels.csv")
+
+SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 
 @st.cache_resource
 def get_drive_service():
-    """Authenticate with Google Drive using service account from secrets."""
-    info = dict(st.secrets["service_account"])  # TOML -> dict
+    """Authenticate with Google Drive using service account JSON from env."""
+    info = json.loads(SERVICE_ACCOUNT_JSON)
     creds = service_account.Credentials.from_service_account_info(
         info,
         scopes=["https://www.googleapis.com/auth/drive"]
@@ -37,8 +42,8 @@ def _drive_guard(fn, what: str):
     except (HttpError, ssl.SSLError) as e:
         st.error(
             f"Error talking to Google Drive while **{what}**.\n\n"
-            "This is a network/SSL issue between the host and Google, "
-            "not your data. Please refresh the page or try again later.\n\n"
+            "This is a network/SSL issue between the host and Google. "
+            "Please refresh the page or try again later.\n\n"
             f"Details: {e}"
         )
         st.stop()
@@ -219,7 +224,7 @@ if page == "Labeling":
     img = download_image_as_pil(service, file_id)
     width, height = img.size
 
-    # Show raw image for sanity
+    # Show raw image
     st.image(img, caption="Raw image from Drive", use_column_width=False)
 
     max_dim = 900
@@ -310,7 +315,7 @@ if page == "Labeling":
                 "axis_y2": axis_y2,
                 "created_at": datetime.utcnow().isoformat()
             }
- 
+
             labels_df = pd.concat([labels_df, pd.DataFrame([new_row])], ignore_index=True)
             save_labels_df(service, labels_file_id, labels_df)
             move_file_to_labeled(service, file_id)
