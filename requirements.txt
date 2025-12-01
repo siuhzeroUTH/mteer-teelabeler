@@ -2,7 +2,9 @@ streamlit
 streamlit-drawable-canvas-fix
 pandas
 pillow
-google-api-python-client
-google-auth
-google-auth-httplib2
-google-auth-oauthlib
+
+google-api-python-client==2.153.0
+google-auth==2.34.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+httplib2==0.20.4
