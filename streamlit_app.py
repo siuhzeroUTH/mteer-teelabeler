@@ -10,7 +10,6 @@ from streamlit_drawable_canvas import st_canvas
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
-st.write("Loaded folders:", st.secrets["drive"])
 
 # ----------------- CONFIG & GOOGLE DRIVE HELPERS ----------------- #
 
@@ -22,8 +21,8 @@ LABELS_FILENAME    = st.secrets["drive"]["labels_filename"]
 
 @st.cache_resource
 def get_drive_service():
-    """Authenticate with Google Drive using service account from secrets."""
-    info = json.loads(st.secrets["service_account_json"])
+    # st.secrets["service_account"] is already a dict-like object from TOML
+    info = dict(st.secrets["service_account"])
     creds = service_account.Credentials.from_service_account_info(
         info,
         scopes=["https://www.googleapis.com/auth/drive"]
