@@ -291,7 +291,7 @@ if page == "Labeling":
         height=height,
         width=width,
         drawing_mode=draw_mode,
-        key="canvas",
+        key=f"canvas_{file_id}",
         display_toolbar=True,
     )
 
