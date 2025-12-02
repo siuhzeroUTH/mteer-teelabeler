@@ -255,7 +255,7 @@ if page == "Dashboard":
         st.subheader("Recent labels")
         st.dataframe(labels_df.sort_values("created_at", ascending=False).head(20))
 
-# ----------------- LABELING PAGE (single canvas, multi-feature) ----------------- #
+# ----------------- LABELING PAGE (single canvas, multi-feature, radios) ----------------- #
 
 if page == "Labeling":
     st.title("TEE Clip & Leaflet Labeling")
@@ -293,8 +293,6 @@ if page == "Labeling":
         width, height = orig_width, orig_height
 
     st.write(f"Displayed image size: {width} x {height}  (scale factor {scale:.3f})")
-
-    # Store scale so we can unscale later
     st.session_state["current_scale"] = scale
 
     # ---- Feature configuration ---- #
@@ -332,15 +330,10 @@ if page == "Labeling":
         },
     }
 
-    # Current active tool (feature + mode)
     if "current_feature" not in st.session_state:
         st.session_state["current_feature"] = "left_clip"
     if "current_mode" not in st.session_state:
         st.session_state["current_mode"] = "rect"  # "rect" or "line"
-
-    def set_tool(feature_key, mode):
-        st.session_state["current_feature"] = feature_key
-        st.session_state["current_mode"] = mode
 
     def clear_feature(feature_key):
         """Remove all shapes for this feature's color from the stored canvas JSON."""
@@ -359,28 +352,52 @@ if page == "Labeling":
     with col_controls:
         st.subheader("Tools")
 
+        # Feature selection (only one at a time)
+        feature_keys = list(FEATURES.keys())
+        feature_labels = [FEATURES[k]["label"] for k in feature_keys]
+        selected_index = feature_keys.index(st.session_state["current_feature"]) \
+            if st.session_state["current_feature"] in feature_keys else 0
+
+        feature_choice = st.radio(
+            "Structure",
+            feature_keys,
+            format_func=lambda k: FEATURES[k]["label"],
+            index=selected_index,
+        )
+        st.session_state["current_feature"] = feature_choice
+        active_feature = feature_choice
+        active_meta = FEATURES[active_feature]
+
+        # Tool selection (rect / axis). For leaflet-only, force rect.
+        if active_meta["has_axis"]:
+            mode_choice = st.radio(
+                "Tool",
+                ["rect", "line"],
+                format_func=lambda m: "Rectangle" if m == "rect" else "Axis (line)",
+                index=0 if st.session_state["current_mode"] == "rect" else 1,
+            )
+            st.session_state["current_mode"] = mode_choice
+        else:
+            st.session_state["current_mode"] = "rect"
+            st.radio(
+                "Tool",
+                ["rect"],
+                index=0,
+                format_func=lambda m: "Rectangle (axis not needed)",
+            )
+
+        # Per-feature clear buttons
+        st.markdown("### Clear individual structures")
         for key, meta in FEATURES.items():
-            st.markdown(f"**{meta['label']}**  \n"
-                        f"<span style='color:{meta['color']}'>■</span> annotations",
-                        unsafe_allow_html=True)
-            c1, c2, c3 = st.columns([1, 1, 1])
-
-            # Rectangle button
-            if c1.button("Rect", key=f"btn_rect_{key}"):
-                set_tool(key, "rect")
-
-            # Axis (line) button if this feature has an axis
-            if meta["has_axis"]:
-                if c2.button("Axis", key=f"btn_axis_{key}"):
-                    set_tool(key, "line")
-                clear_col = c3
-            else:
-                clear_col = c2
-
-            # Clear button (removes shapes for this feature only)
-            if clear_col.button("Clear", key=f"btn_clear_{key}"):
-                clear_feature(key)
-                st.experimental_rerun()
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                if st.button("Clear", key=f"btn_clear_{key}"):
+                    clear_feature(key)
+            with c2:
+                st.markdown(
+                    f"<span style='color:{meta['color']}'>■</span> {meta['label']}",
+                    unsafe_allow_html=True,
+                )
 
         st.markdown("---")
         if st.button("Submit labels", key="submit_labels"):
@@ -398,11 +415,11 @@ if page == "Labeling":
                     for obj in objects:
                         if obj.get("stroke") != color:
                             continue
-                        if obj["type"] == "rect":
+                        if obj["type"] == "rect" and feature_rect[key] is None:
                             left = obj["left"]; top = obj["top"]
                             w = obj["width"]; h = obj["height"]
                             feature_rect[key] = (left, top, left + w, top + h)
-                        elif obj["type"] == "line":
+                        elif obj["type"] == "line" and feature_axis[key] is None:
                             feature_axis[key] = (
                                 obj["x1"], obj["y1"], obj["x2"], obj["y2"]
                             )
@@ -427,7 +444,6 @@ if page == "Labeling":
                     else:
                         return l
 
-                # Unscale everything to original image coordinates
                 lc_bbox = unscale_bbox(feature_rect["left_clip"])
                 lc_axis = unscale_line(feature_axis["left_clip"])
                 rc_bbox = unscale_bbox(feature_rect["right_clip"])
@@ -510,14 +526,13 @@ if page == "Labeling":
     with col_canvas:
         st.subheader(f"Image: {image_name}")
 
-        # Current drawing mode & color
         active_feature = st.session_state["current_feature"]
         active_mode = st.session_state["current_mode"]
         active_color = FEATURES[active_feature]["color"]
         drawing_mode = "rect" if active_mode == "rect" else "line"
 
         st.caption(
-            f"Active tool: {FEATURES[active_feature]['label']} – "
+            f"Active: {FEATURES[active_feature]['label']} – "
             f"{'Rectangle' if drawing_mode == 'rect' else 'Axis line'}"
         )
 
@@ -536,7 +551,7 @@ if page == "Labeling":
             display_toolbar=True,
         )
 
-        # Persist the latest canvas JSON so we can submit / clear later
         if canvas_result.json_data is not None:
             st.session_state["canvas_json"] = canvas_result.json_data
+
 
