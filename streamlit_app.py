@@ -255,7 +255,7 @@ if page == "Dashboard":
         st.subheader("Recent labels")
         st.dataframe(labels_df.sort_values("created_at", ascending=False).head(20))
 
-# ----------------- LABELING PAGE (6-step wizard, with persistent canvas + Clear) ----------------- #
+# ----------------- LABELING PAGE (6-step wizard, with persis# ----------------- LABELING PAGE (6-step wizard, persistent canvas + Clear) ----------------- #
 
 if page == "Labeling":
     st.title("TEE Clip & Leaflet Labeling")
@@ -276,10 +276,10 @@ if page == "Labeling":
             st.stop()
         st.session_state["current_file_id"] = current_file["id"]
         st.session_state["current_image_name"] = current_file["name"]
-        st.session_state["raw_shapes"] = {}  # will hold raw bboxes/axes for this image
-        # also clear any old canvas data from previous image
+        st.session_state["raw_shapes"] = {}  # holds raw bboxes/axes for this image
+        # clear any old canvas data from previous image
         for k in list(st.session_state.keys()):
-            if k.startswith("canvas_step"):
+            if k.startswith("canvas_data_step"):
                 del st.session_state[k]
 
     file_id = st.session_state["current_file_id"]
@@ -349,9 +349,9 @@ if page == "Labeling":
                     break
         return bbox
 
-    # small helper to get per-step canvas key
-    def canvas_key(step_num):
-        return f"canvas_step{step_num}_{file_id}"
+    # keys for canvas JSON storage (different from widget keys!)
+    def canvas_state_key(step_num):
+        return f"canvas_data_step{step_num}_{file_id}"
 
     # ------- Step 1: Left clip (bbox + axis) ------- #
     if step == 1:
@@ -365,8 +365,8 @@ if page == "Labeling":
         )
         draw_mode = "rect" if tool.startswith("Rectangle") else "line"
 
-        ckey = canvas_key(1)
-        initial = st.session_state.get(ckey)
+        s_key = canvas_state_key(1)
+        initial = st.session_state.get(s_key)
 
         canvas = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
@@ -378,21 +378,21 @@ if page == "Labeling":
             height=height,
             width=width,
             drawing_mode=draw_mode,
-            key=f"canvas_step1_{file_id}",
-            initial_drawing=initial,
+            key=f"canvas_step1_{file_id}",   # widget key
+            initial_drawing=initial,         # state key
             display_toolbar=True,
         )
 
         if canvas.json_data is not None:
-            st.session_state[ckey] = canvas.json_data
+            st.session_state[s_key] = canvas.json_data
 
         left_clip_bbox, left_clip_axis = parse_first_rect_and_line(
-            st.session_state.get(ckey)
+            st.session_state.get(s_key)
         )
 
         cols = st.columns(3)
         if cols[0].button("Clear drawing"):
-            st.session_state[ckey] = None
+            st.session_state[s_key] = None
             st.rerun()
         if cols[1].button("Next (right clip)"):
             if left_clip_bbox is None or left_clip_axis is None:
@@ -416,8 +416,8 @@ if page == "Labeling":
         )
         draw_mode = "rect" if tool.startswith("Rectangle") else "line"
 
-        ckey = canvas_key(2)
-        initial = st.session_state.get(ckey)
+        s_key = canvas_state_key(2)
+        initial = st.session_state.get(s_key)
 
         canvas = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
@@ -435,10 +435,10 @@ if page == "Labeling":
         )
 
         if canvas.json_data is not None:
-            st.session_state[ckey] = canvas.json_data
+            st.session_state[s_key] = canvas.json_data
 
         right_clip_bbox, right_clip_axis = parse_first_rect_and_line(
-            st.session_state.get(ckey)
+            st.session_state.get(s_key)
         )
 
         cols = st.columns(3)
@@ -446,7 +446,7 @@ if page == "Labeling":
             st.session_state["label_step"] = 1
             st.rerun()
         if cols[1].button("Clear drawing"):
-            st.session_state[ckey] = None
+            st.session_state[s_key] = None
             st.rerun()
         if cols[2].button("Next (anterior leaflet)"):
             if right_clip_bbox is None or right_clip_axis is None:
@@ -462,8 +462,8 @@ if page == "Labeling":
     elif step == 3:
         st.markdown("### Step 3: Anterior leaflet")
 
-        ckey = canvas_key(3)
-        initial = st.session_state.get(ckey)
+        s_key = canvas_state_key(3)
+        initial = st.session_state.get(s_key)
 
         canvas = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
@@ -481,16 +481,16 @@ if page == "Labeling":
         )
 
         if canvas.json_data is not None:
-            st.session_state[ckey] = canvas.json_data
+            st.session_state[s_key] = canvas.json_data
 
-        ant_leaflet_bbox = parse_first_rect(st.session_state.get(ckey))
+        ant_leaflet_bbox = parse_first_rect(st.session_state.get(s_key))
 
         cols = st.columns(3)
         if cols[0].button("Back"):
             st.session_state["label_step"] = 2
             st.rerun()
         if cols[1].button("Clear drawing"):
-            st.session_state[ckey] = None
+            st.session_state[s_key] = None
             st.rerun()
         if cols[2].button("Next (posterior leaflet)"):
             if ant_leaflet_bbox is None:
@@ -505,8 +505,8 @@ if page == "Labeling":
     elif step == 4:
         st.markdown("### Step 4: Posterior leaflet")
 
-        ckey = canvas_key(4)
-        initial = st.session_state.get(ckey)
+        s_key = canvas_state_key(4)
+        initial = st.session_state.get(s_key)
 
         canvas = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
@@ -524,16 +524,16 @@ if page == "Labeling":
         )
 
         if canvas.json_data is not None:
-            st.session_state[ckey] = canvas.json_data
+            st.session_state[s_key] = canvas.json_data
 
-        post_leaflet_bbox = parse_first_rect(st.session_state.get(ckey))
+        post_leaflet_bbox = parse_first_rect(st.session_state.get(s_key))
 
         cols = st.columns(3)
         if cols[0].button("Back"):
             st.session_state["label_step"] = 3
             st.rerun()
         if cols[1].button("Clear drawing"):
-            st.session_state[ckey] = None
+            st.session_state[s_key] = None
             st.rerun()
         if cols[2].button("Next (left clip stem)"):
             if post_leaflet_bbox is None:
@@ -556,8 +556,8 @@ if page == "Labeling":
         )
         draw_mode = "rect" if tool.startswith("Rectangle") else "line"
 
-        ckey = canvas_key(5)
-        initial = st.session_state.get(ckey)
+        s_key = canvas_state_key(5)
+        initial = st.session_state.get(s_key)
 
         canvas = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
@@ -575,10 +575,10 @@ if page == "Labeling":
         )
 
         if canvas.json_data is not None:
-            st.session_state[ckey] = canvas.json_data
+            st.session_state[s_key] = canvas.json_data
 
         left_stem_bbox, left_stem_axis = parse_first_rect_and_line(
-            st.session_state.get(ckey)
+            st.session_state.get(s_key)
         )
 
         cols = st.columns(3)
@@ -586,7 +586,7 @@ if page == "Labeling":
             st.session_state["label_step"] = 4
             st.rerun()
         if cols[1].button("Clear drawing"):
-            st.session_state[ckey] = None
+            st.session_state[s_key] = None
             st.rerun()
         if cols[2].button("Next (right clip stem)"):
             if left_stem_bbox is None or left_stem_axis is None:
@@ -610,8 +610,8 @@ if page == "Labeling":
         )
         draw_mode = "rect" if tool.startswith("Rectangle") else "line"
 
-        ckey = canvas_key(6)
-        initial = st.session_state.get(ckey)
+        s_key = canvas_state_key(6)
+        initial = st.session_state.get(s_key)
 
         canvas = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
@@ -629,10 +629,10 @@ if page == "Labeling":
         )
 
         if canvas.json_data is not None:
-            st.session_state[ckey] = canvas.json_data
+            st.session_state[s_key] = canvas.json_data
 
         right_stem_bbox, right_stem_axis = parse_first_rect_and_line(
-            st.session_state.get(ckey)
+            st.session_state.get(s_key)
         )
 
         cols = st.columns(3)
@@ -640,7 +640,7 @@ if page == "Labeling":
             st.session_state["label_step"] = 5
             st.rerun()
         if cols[1].button("Clear drawing"):
-            st.session_state[ckey] = None
+            st.session_state[s_key] = None
             st.rerun()
 
         if cols[2].button("Submit all labels for this image"):
@@ -736,11 +736,9 @@ if page == "Labeling":
                 st.session_state.pop("current_image_name", None)
                 st.session_state.pop("raw_shapes", None)
                 for k in list(st.session_state.keys()):
-                    if k.startswith("canvas_step"):
+                    if k.startswith("canvas_data_step"):
                         del st.session_state[k]
                 st.session_state["label_step"] = 1
 
                 st.success("Labels saved! Loading next image...")
                 st.rerun()
-
-
