@@ -177,14 +177,16 @@ def get_labels_df(session):
 
     cols = [
         "image_name","drive_file_id","annotator",
-        "clip_bbox_x1","clip_bbox_y1","clip_bbox_x2","clip_bbox_y2",
-        "axis_x1","axis_y1","axis_x2","axis_y2",
         "left_clip_bbox_x1","left_clip_bbox_y1","left_clip_bbox_x2","left_clip_bbox_y2",
+        "left_clip_axis_x1","left_clip_axis_y1","left_clip_axis_x2","left_clip_axis_y2",
         "right_clip_bbox_x1","right_clip_bbox_y1","right_clip_bbox_x2","right_clip_bbox_y2",
+        "right_clip_axis_x1","right_clip_axis_y1","right_clip_axis_x2","right_clip_axis_y2",
         "ant_leaflet_bbox_x1","ant_leaflet_bbox_y1","ant_leaflet_bbox_x2","ant_leaflet_bbox_y2",
         "post_leaflet_bbox_x1","post_leaflet_bbox_y1","post_leaflet_bbox_x2","post_leaflet_bbox_y2",
         "left_stem_bbox_x1","left_stem_bbox_y1","left_stem_bbox_x2","left_stem_bbox_y2",
+        "left_stem_axis_x1","left_stem_axis_y1","left_stem_axis_x2","left_stem_axis_y2",
         "right_stem_bbox_x1","right_stem_bbox_y1","right_stem_bbox_x2","right_stem_bbox_y2",
+        "right_stem_axis_x1","right_stem_axis_y1","right_stem_axis_x2","right_stem_axis_y2",
         "created_at",
     ]
 
@@ -253,7 +255,7 @@ if page == "Dashboard":
         st.subheader("Recent labels")
         st.dataframe(labels_df.sort_values("created_at", ascending=False).head(20))
 
-# ----------------- LABELING PAGE (wizard) ----------------- #
+# ----------------- LABELING PAGE (6-step wizard) ----------------- #
 
 if page == "Labeling":
     st.title("TEE Clip & Leaflet Labeling")
@@ -273,14 +275,14 @@ if page == "Labeling":
             st.stop()
         st.session_state["current_file_id"] = current_file["id"]
         st.session_state["current_image_name"] = current_file["name"]
-        st.session_state["raw_shapes"] = {}  # will hold raw bboxes/axis in canvas coords
+        st.session_state["raw_shapes"] = {}  # will hold raw bboxes/axes in canvas coords
 
     file_id = st.session_state["current_file_id"]
     image_name = st.session_state["current_image_name"]
     step = st.session_state["label_step"]
     raw_shapes = st.session_state["raw_shapes"]
 
-    st.subheader(f"Image: {image_name}  |  Step {step} of 7")
+    st.subheader(f"Image: {image_name}  |  Step {step} of 6")
     st.write("DEBUG – current file id:", file_id)
 
     img = download_image_as_pil(session, file_id)
@@ -301,7 +303,7 @@ if page == "Labeling":
 
     st.write(f"Displayed image size: {width} x {height} (scale factor {scale:.3f})")
 
-    # helper to unscale
+    # helpers
     def unscale_bbox(b):
         if b is None:
             return (None, None, None, None)
@@ -320,301 +322,312 @@ if page == "Labeling":
         else:
             return l
 
-    # Single canvas per step
-    def draw_step(step_num, instruction, mode, color, key_suffix):
-        st.markdown(f"### {instruction}")
+    def parse_first_rect_and_line(json_data):
+        bbox = None
+        axis = None
+        if json_data is not None:
+            for obj in json_data.get("objects", []):
+                if obj["type"] == "rect" and bbox is None:
+                    left = obj["left"]; top = obj["top"]
+                    w = obj["width"]; h = obj["height"]
+                    bbox = (left, top, left + w, top + h)
+                elif obj["type"] == "line" and axis is None:
+                    axis = (obj["x1"], obj["y1"], obj["x2"], obj["y2"])
+        return bbox, axis
+
+    def parse_first_rect(json_data):
+        bbox = None
+        if json_data is not None:
+            for obj in json_data.get("objects", []):
+                if obj["type"] == "rect":
+                    left = obj["left"]; top = obj["top"]
+                    w = obj["width"]; h = obj["height"]
+                    bbox = (left, top, left + w, top + h)
+                    break
+        return bbox
+
+    # ------- Step 1: Left clip (bbox + axis) ------- #
+    if step == 1:
+        st.markdown("### Step 1: Left clip body")
+
+        tool = st.radio(
+            "Choose drawing tool (left clip):",
+            ["Rectangle (bbox)", "Line (axis)"],
+            horizontal=True,
+            key=f"tool_step1_{file_id}",
+        )
+        draw_mode = "rect" if tool.startswith("Rectangle") else "line"
+
         canvas = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
-            stroke_width=3 if mode == "line" else 2,
-            stroke_color=color,
+            stroke_width=3,
+            stroke_color="#00FFFF",  # cyan
             background_color="#000000",
             background_image=img,
             update_streamlit=True,
             height=height,
             width=width,
-            drawing_mode=mode,
-            key=f"canvas_step{step_num}_{file_id}",
+            drawing_mode=draw_mode,
+            key=f"canvas_step1_{file_id}",
             display_toolbar=True,
         )
-        return canvas
 
-    # ------- Step-specific logic ------- #
+        left_clip_bbox, left_clip_axis = parse_first_rect_and_line(canvas.json_data)
+        st.info(f"Left clip bbox: {left_clip_bbox}")
+        st.info(f"Left clip axis: {left_clip_axis}")
 
-    if step == 1:
-        # Clip bbox + axis
-        st.write("Draw ONE rectangle around the whole clip, and ONE line along its axis.")
-        canvas = draw_step(
-            1,
-            "Step 1: Clip bounding box (red) and axis line",
-            mode="freedraw",  # we'll still parse rect+line from objects
-            color="#FF0000",
-            key_suffix="clip",
-        )
-        clip_bbox = None
-        axis = None
-        if canvas.json_data is not None:
-            for obj in canvas.json_data.get("objects", []):
-                if obj["type"] == "rect" and clip_bbox is None:
-                    left = obj["left"]; top = obj["top"]
-                    w = obj["width"]; h = obj["height"]
-                    clip_bbox = (left, top, left + w, top + h)
-                elif obj["type"] == "line" and axis is None:
-                    axis = (obj["x1"], obj["y1"], obj["x2"], obj["y2"])
-
-        st.info(f"Clip bbox: {clip_bbox}")
-        st.info(f"Axis: {axis}")
-
-        if st.button("Next (left clip body)"):
-            if clip_bbox is None or axis is None:
-                st.error("Please draw BOTH a rectangle and a line.")
+        if st.button("Next (right clip)"):
+            if left_clip_bbox is None or left_clip_axis is None:
+                st.error("Please draw BOTH a rectangle and a line for the left clip.")
             else:
-                raw_shapes["clip_bbox"] = clip_bbox
-                raw_shapes["axis"] = axis
+                raw_shapes["left_clip_bbox"] = left_clip_bbox
+                raw_shapes["left_clip_axis"] = left_clip_axis
                 st.session_state["raw_shapes"] = raw_shapes
                 st.session_state["label_step"] = 2
                 st.rerun()
 
+    # ------- Step 2: Right clip (bbox + axis) ------- #
     elif step == 2:
-        # Left clip body
-        st.write("Draw ONE rectangle around the **LEFT** clip body.")
-        canvas = draw_step(
-            2,
-            "Step 2: Left clip body (cyan)",
-            mode="rect",
-            color="#00FFFF",
-            key_suffix="left_clip",
-        )
-        left_clip = None
-        if canvas.json_data is not None:
-            for obj in canvas.json_data.get("objects", []):
-                if obj["type"] == "rect":
-                    left = obj["left"]; top = obj["top"]
-                    w = obj["width"]; h = obj["height"]
-                    left_clip = (left, top, left + w, top + h)
-                    break
+        st.markdown("### Step 2: Right clip body")
 
-        st.info(f"Left clip bbox: {left_clip}")
+        tool = st.radio(
+            "Choose drawing tool (right clip):",
+            ["Rectangle (bbox)", "Line (axis)"],
+            horizontal=True,
+            key=f"tool_step2_{file_id}",
+        )
+        draw_mode = "rect" if tool.startswith("Rectangle") else "line"
+
+        canvas = st_canvas(
+            fill_color="rgba(0, 0, 0, 0)",
+            stroke_width=3,
+            stroke_color="#FFA500",  # orange
+            background_color="#000000",
+            background_image=img,
+            update_streamlit=True,
+            height=height,
+            width=width,
+            drawing_mode=draw_mode,
+            key=f"canvas_step2_{file_id}",
+            display_toolbar=True,
+        )
+
+        right_clip_bbox, right_clip_axis = parse_first_rect_and_line(canvas.json_data)
+        st.info(f"Right clip bbox: {right_clip_bbox}")
+        st.info(f"Right clip axis: {right_clip_axis}")
 
         cols = st.columns(2)
         if cols[0].button("Back"):
             st.session_state["label_step"] = 1
             st.rerun()
-        if cols[1].button("Next (right clip body)"):
-            if left_clip is None:
-                st.error("Please draw a rectangle for the left clip.")
+        if cols[1].button("Next (anterior leaflet)"):
+            if right_clip_bbox is None or right_clip_axis is None:
+                st.error("Please draw BOTH a rectangle and a line for the right clip.")
             else:
-                raw_shapes["left_clip_bbox"] = left_clip
+                raw_shapes["right_clip_bbox"] = right_clip_bbox
+                raw_shapes["right_clip_axis"] = right_clip_axis
                 st.session_state["raw_shapes"] = raw_shapes
                 st.session_state["label_step"] = 3
                 st.rerun()
 
+    # ------- Step 3: Anterior leaflet (bbox only) ------- #
     elif step == 3:
-        # Right clip body
-        st.write("Draw ONE rectangle around the **RIGHT** clip body.")
-        canvas = draw_step(
-            3,
-            "Step 3: Right clip body (orange)",
-            mode="rect",
-            color="#FFA500",
-            key_suffix="right_clip",
-        )
-        right_clip = None
-        if canvas.json_data is not None:
-            for obj in canvas.json_data.get("objects", []):
-                if obj["type"] == "rect":
-                    left = obj["left"]; top = obj["top"]
-                    w = obj["width"]; h = obj["height"]
-                    right_clip = (left, top, left + w, top + h)
-                    break
+        st.markdown("### Step 3: Anterior leaflet")
 
-        st.info(f"Right clip bbox: {right_clip}")
+        canvas = st_canvas(
+            fill_color="rgba(0, 0, 0, 0)",
+            stroke_width=2,
+            stroke_color="#FFFF00",  # yellow
+            background_color="#000000",
+            background_image=img,
+            update_streamlit=True,
+            height=height,
+            width=width,
+            drawing_mode="rect",
+            key=f"canvas_step3_{file_id}",
+            display_toolbar=True,
+        )
+
+        ant_leaflet_bbox = parse_first_rect(canvas.json_data)
+        st.info(f"Anterior leaflet bbox: {ant_leaflet_bbox}")
 
         cols = st.columns(2)
         if cols[0].button("Back"):
             st.session_state["label_step"] = 2
             st.rerun()
-        if cols[1].button("Next (anterior leaflet)"):
-            if right_clip is None:
-                st.error("Please draw a rectangle for the right clip.")
+        if cols[1].button("Next (posterior leaflet)"):
+            if ant_leaflet_bbox is None:
+                st.error("Please draw a rectangle for the anterior leaflet.")
             else:
-                raw_shapes["right_clip_bbox"] = right_clip
+                raw_shapes["ant_leaflet_bbox"] = ant_leaflet_bbox
                 st.session_state["raw_shapes"] = raw_shapes
                 st.session_state["label_step"] = 4
                 st.rerun()
 
+    # ------- Step 4: Posterior leaflet (bbox only) ------- #
     elif step == 4:
-        # Anterior leaflet
-        st.write("Draw ONE rectangle around the **ANTERIOR** leaflet.")
-        canvas = draw_step(
-            4,
-            "Step 4: Anterior leaflet (yellow)",
-            mode="rect",
-            color="#FFFF00",
-            key_suffix="ant_leaflet",
-        )
-        ant = None
-        if canvas.json_data is not None:
-            for obj in canvas.json_data.get("objects", []):
-                if obj["type"] == "rect":
-                    left = obj["left"]; top = obj["top"]
-                    w = obj["width"]; h = obj["height"]
-                    ant = (left, top, left + w, top + h)
-                    break
+        st.markdown("### Step 4: Posterior leaflet")
 
-        st.info(f"Anterior leaflet bbox: {ant}")
+        canvas = st_canvas(
+            fill_color="rgba(0, 0, 0, 0)",
+            stroke_width=2,
+            stroke_color="#0000FF",  # blue
+            background_color="#000000",
+            background_image=img,
+            update_streamlit=True,
+            height=height,
+            width=width,
+            drawing_mode="rect",
+            key=f"canvas_step4_{file_id}",
+            display_toolbar=True,
+        )
+
+        post_leaflet_bbox = parse_first_rect(canvas.json_data)
+        st.info(f"Posterior leaflet bbox: {post_leaflet_bbox}")
 
         cols = st.columns(2)
         if cols[0].button("Back"):
             st.session_state["label_step"] = 3
             st.rerun()
-        if cols[1].button("Next (posterior leaflet)"):
-            if ant is None:
-                st.error("Please draw a rectangle for the anterior leaflet.")
+        if cols[1].button("Next (left clip stem)"):
+            if post_leaflet_bbox is None:
+                st.error("Please draw a rectangle for the posterior leaflet.")
             else:
-                raw_shapes["ant_leaflet_bbox"] = ant
+                raw_shapes["post_leaflet_bbox"] = post_leaflet_bbox
                 st.session_state["raw_shapes"] = raw_shapes
                 st.session_state["label_step"] = 5
                 st.rerun()
 
+    # ------- Step 5: Left clip stem (bbox + axis) ------- #
     elif step == 5:
-        # Posterior leaflet
-        st.write("Draw ONE rectangle around the **POSTERIOR** leaflet.")
-        canvas = draw_step(
-            5,
-            "Step 5: Posterior leaflet (blue)",
-            mode="rect",
-            color="#0000FF",
-            key_suffix="post_leaflet",
-        )
-        post = None
-        if canvas.json_data is not None:
-            for obj in canvas.json_data.get("objects", []):
-                if obj["type"] == "rect":
-                    left = obj["left"]; top = obj["top"]
-                    w = obj["width"]; h = obj["height"]
-                    post = (left, top, left + w, top + h)
-                    break
+        st.markdown("### Step 5: Left clip stem")
 
-        st.info(f"Posterior leaflet bbox: {post}")
+        tool = st.radio(
+            "Choose drawing tool (left stem):",
+            ["Rectangle (bbox)", "Line (axis)"],
+            horizontal=True,
+            key=f"tool_step5_{file_id}",
+        )
+        draw_mode = "rect" if tool.startswith("Rectangle") else "line"
+
+        canvas = st_canvas(
+            fill_color="rgba(0, 0, 0, 0)",
+            stroke_width=3,
+            stroke_color="#FF00FF",  # magenta
+            background_color="#000000",
+            background_image=img,
+            update_streamlit=True,
+            height=height,
+            width=width,
+            drawing_mode=draw_mode,
+            key=f"canvas_step5_{file_id}",
+            display_toolbar=True,
+        )
+
+        left_stem_bbox, left_stem_axis = parse_first_rect_and_line(canvas.json_data)
+        st.info(f"Left stem bbox: {left_stem_bbox}")
+        st.info(f"Left stem axis: {left_stem_axis}")
 
         cols = st.columns(2)
         if cols[0].button("Back"):
             st.session_state["label_step"] = 4
             st.rerun()
-        if cols[1].button("Next (left clip stem)"):
-            if post is None:
-                st.error("Please draw a rectangle for the posterior leaflet.")
+        if cols[1].button("Next (right clip stem)"):
+            if left_stem_bbox is None or left_stem_axis is None:
+                st.error("Please draw BOTH a rectangle and a line for the left stem.")
             else:
-                raw_shapes["post_leaflet_bbox"] = post
+                raw_shapes["left_stem_bbox"] = left_stem_bbox
+                raw_shapes["left_stem_axis"] = left_stem_axis
                 st.session_state["raw_shapes"] = raw_shapes
                 st.session_state["label_step"] = 6
                 st.rerun()
 
+    # ------- Step 6: Right clip stem (bbox + axis) + submit ------- #
     elif step == 6:
-        # Left stem
-        st.write("Draw ONE rectangle around the **LEFT** clip stem.")
-        canvas = draw_step(
-            6,
-            "Step 6: Left clip stem (magenta)",
-            mode="rect",
-            color="#FF00FF",
-            key_suffix="left_stem",
-        )
-        lstem = None
-        if canvas.json_data is not None:
-            for obj in canvas.json_data.get("objects", []):
-                if obj["type"] == "rect":
-                    left = obj["left"]; top = obj["top"]
-                    w = obj["width"]; h = obj["height"]
-                    lstem = (left, top, left + w, top + h)
-                    break
+        st.markdown("### Step 6: Right clip stem")
 
-        st.info(f"Left stem bbox: {lstem}")
+        tool = st.radio(
+            "Choose drawing tool (right stem):",
+            ["Rectangle (bbox)", "Line (axis)"],
+            horizontal=True,
+            key=f"tool_step6_{file_id}",
+        )
+        draw_mode = "rect" if tool.startswith("Rectangle") else "line"
+
+        canvas = st_canvas(
+            fill_color="rgba(0, 0, 0, 0)",
+            stroke_width=3,
+            stroke_color="#00FF00",  # green
+            background_color="#000000",
+            background_image=img,
+            update_streamlit=True,
+            height=height,
+            width=width,
+            drawing_mode=draw_mode,
+            key=f"canvas_step6_{file_id}",
+            display_toolbar=True,
+        )
+
+        right_stem_bbox, right_stem_axis = parse_first_rect_and_line(canvas.json_data)
+        st.info(f"Right stem bbox: {right_stem_bbox}")
+        st.info(f"Right stem axis: {right_stem_axis}")
 
         cols = st.columns(2)
         if cols[0].button("Back"):
             st.session_state["label_step"] = 5
             st.rerun()
-        if cols[1].button("Next (right clip stem)"):
-            if lstem is None:
-                st.error("Please draw a rectangle for the left stem.")
-            else:
-                raw_shapes["left_stem_bbox"] = lstem
-                st.session_state["raw_shapes"] = raw_shapes
-                st.session_state["label_step"] = 7
-                st.rerun()
-
-    elif step == 7:
-        # Right stem + submit
-        st.write("Draw ONE rectangle around the **RIGHT** clip stem.")
-        canvas = draw_step(
-            7,
-            "Step 7: Right clip stem (green)",
-            mode="rect",
-            color="#00FF00",
-            key_suffix="right_stem",
-        )
-        rstem = None
-        if canvas.json_data is not None:
-            for obj in canvas.json_data.get("objects", []):
-                if obj["type"] == "rect":
-                    left = obj["left"]; top = obj["top"]
-                    w = obj["width"]; h = obj["height"]
-                    rstem = (left, top, left + w, top + h)
-                    break
-
-        st.info(f"Right stem bbox: {rstem}")
-
-        cols = st.columns(2)
-        if cols[0].button("Back"):
-            st.session_state["label_step"] = 6
-            st.rerun()
 
         if cols[1].button("Submit all labels for this image"):
-            if rstem is None:
-                st.error("Please draw a rectangle for the right stem.")
+            if right_stem_bbox is None or right_stem_axis is None:
+                st.error("Please draw BOTH a rectangle and a line for the right stem.")
             else:
-                raw_shapes["right_stem_bbox"] = rstem
+                raw_shapes["right_stem_bbox"] = right_stem_bbox
+                raw_shapes["right_stem_axis"] = right_stem_axis
 
-                # pull everything out, unscale to original coords
-                clip_bbox = raw_shapes.get("clip_bbox")
-                axis = raw_shapes.get("axis")
-                left_clip = raw_shapes.get("left_clip_bbox")
-                right_clip = raw_shapes.get("right_clip_bbox")
-                ant = raw_shapes.get("ant_leaflet_bbox")
-                post = raw_shapes.get("post_leaflet_bbox")
-                lstem = raw_shapes.get("left_stem_bbox")
-                rstem = raw_shapes.get("right_stem_bbox")
+                # extract all shapes
+                left_clip_bbox   = raw_shapes.get("left_clip_bbox")
+                left_clip_axis   = raw_shapes.get("left_clip_axis")
+                right_clip_bbox  = raw_shapes.get("right_clip_bbox")
+                right_clip_axis  = raw_shapes.get("right_clip_axis")
+                ant_leaflet_bbox = raw_shapes.get("ant_leaflet_bbox")
+                post_leaflet_bbox= raw_shapes.get("post_leaflet_bbox")
+                left_stem_bbox   = raw_shapes.get("left_stem_bbox")
+                left_stem_axis   = raw_shapes.get("left_stem_axis")
+                right_stem_bbox  = raw_shapes.get("right_stem_bbox")
+                right_stem_axis  = raw_shapes.get("right_stem_axis")
 
-                clip_x1, clip_y1, clip_x2, clip_y2 = unscale_bbox(clip_bbox)
-                axis_x1, axis_y1, axis_x2, axis_y2 = unscale_line(axis)
-                lclip_x1, lclip_y1, lclip_x2, lclip_y2 = unscale_bbox(left_clip)
-                rclip_x1, rclip_y1, rclip_x2, rclip_y2 = unscale_bbox(right_clip)
-                ant_x1, ant_y1, ant_x2, ant_y2 = unscale_bbox(ant)
-                post_x1, post_y1, post_x2, post_y2 = unscale_bbox(post)
-                lstem_x1, lstem_y1, lstem_x2, lstem_y2 = unscale_bbox(lstem)
-                rstem_x1, rstem_y1, rstem_x2, rstem_y2 = unscale_bbox(rstem)
+                # unscale to original image coords
+                lc_x1, lc_y1, lc_x2, lc_y2 = unscale_bbox(left_clip_bbox)
+                lca_x1, lca_y1, lca_x2, lca_y2 = unscale_line(left_clip_axis)
+                rc_x1, rc_y1, rc_x2, rc_y2 = unscale_bbox(right_clip_bbox)
+                rca_x1, rca_y1, rca_x2, rca_y2 = unscale_line(right_clip_axis)
+                ant_x1, ant_y1, ant_x2, ant_y2 = unscale_bbox(ant_leaflet_bbox)
+                post_x1, post_y1, post_x2, post_y2 = unscale_bbox(post_leaflet_bbox)
+                lst_x1, lst_y1, lst_x2, lst_y2 = unscale_bbox(left_stem_bbox)
+                lsta_x1, lsta_y1, lsta_x2, lsta_y2 = unscale_line(left_stem_axis)
+                rst_x1, rst_y1, rst_x2, rst_y2 = unscale_bbox(right_stem_bbox)
+                rsta_x1, rsta_y1, rsta_x2, rsta_y2 = unscale_line(right_stem_axis)
 
                 new_row = {
                     "image_name": image_name,
                     "drive_file_id": file_id,
                     "annotator": annotator,
-                    "clip_bbox_x1": clip_x1,
-                    "clip_bbox_y1": clip_y1,
-                    "clip_bbox_x2": clip_x2,
-                    "clip_bbox_y2": clip_y2,
-                    "axis_x1": axis_x1,
-                    "axis_y1": axis_y1,
-                    "axis_x2": axis_x2,
-                    "axis_y2": axis_y2,
-                    "left_clip_bbox_x1": lclip_x1,
-                    "left_clip_bbox_y1": lclip_y1,
-                    "left_clip_bbox_x2": lclip_x2,
-                    "left_clip_bbox_y2": lclip_y2,
-                    "right_clip_bbox_x1": rclip_x1,
-                    "right_clip_bbox_y1": rclip_y1,
-                    "right_clip_bbox_x2": rclip_x2,
-                    "right_clip_bbox_y2": rclip_y2,
+                    "left_clip_bbox_x1": lc_x1,
+                    "left_clip_bbox_y1": lc_y1,
+                    "left_clip_bbox_x2": lc_x2,
+                    "left_clip_bbox_y2": lc_y2,
+                    "left_clip_axis_x1": lca_x1,
+                    "left_clip_axis_y1": lca_y1,
+                    "left_clip_axis_x2": lca_x2,
+                    "left_clip_axis_y2": lca_y2,
+                    "right_clip_bbox_x1": rc_x1,
+                    "right_clip_bbox_y1": rc_y1,
+                    "right_clip_bbox_x2": rc_x2,
+                    "right_clip_bbox_y2": rc_y2,
+                    "right_clip_axis_x1": rca_x1,
+                    "right_clip_axis_y1": rca_y1,
+                    "right_clip_axis_x2": rca_x2,
+                    "right_clip_axis_y2": rca_y2,
                     "ant_leaflet_bbox_x1": ant_x1,
                     "ant_leaflet_bbox_y1": ant_y1,
                     "ant_leaflet_bbox_x2": ant_x2,
@@ -623,14 +636,22 @@ if page == "Labeling":
                     "post_leaflet_bbox_y1": post_y1,
                     "post_leaflet_bbox_x2": post_x2,
                     "post_leaflet_bbox_y2": post_y2,
-                    "left_stem_bbox_x1": lstem_x1,
-                    "left_stem_bbox_y1": lstem_y1,
-                    "left_stem_bbox_x2": lstem_x2,
-                    "left_stem_bbox_y2": lstem_y2,
-                    "right_stem_bbox_x1": rstem_x1,
-                    "right_stem_bbox_y1": rstem_y1,
-                    "right_stem_bbox_x2": rstem_x2,
-                    "right_stem_bbox_y2": rstem_y2,
+                    "left_stem_bbox_x1": lst_x1,
+                    "left_stem_bbox_y1": lst_y1,
+                    "left_stem_bbox_x2": lst_x2,
+                    "left_stem_bbox_y2": lst_y2,
+                    "left_stem_axis_x1": lsta_x1,
+                    "left_stem_axis_y1": lsta_y1,
+                    "left_stem_axis_x2": lsta_x2,
+                    "left_stem_axis_y2": lsta_y2,
+                    "right_stem_bbox_x1": rst_x1,
+                    "right_stem_bbox_y1": rst_y1,
+                    "right_stem_bbox_x2": rst_x2,
+                    "right_stem_bbox_y2": rst_y2,
+                    "right_stem_axis_x1": rsta_x1,
+                    "right_stem_axis_y1": rsta_y1,
+                    "right_stem_axis_x2": rsta_x2,
+                    "right_stem_axis_y2": rsta_y2,
                     "created_at": datetime.utcnow().isoformat(),
                 }
 
